@@ -1,0 +1,387 @@
+---
+title: "Proyek Akhir Praktikum Data Science"
+author: "Ale domba tersesat"
+date: "2022-11-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tm) #data cleaning (corpus)
+library(twitteR) #akses twitter APIs
+library(rtweet) #collect and organize twitter data
+library(shiny) #shiny
+library(syuzhet) #baca fungsi get_nrc
+library(wordcloud) #wordcloud
+library(vroom) #load dataset
+library(here) #menyimpan dataset
+library(dplyr) #manipulasi data frame
+library(ggplot2) #visualisasi data (barplot, grafik)
+library(RColorBrewer) #pengaturan warna
+library(RTextTools) #buat naive bayes
+library(tidytext)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+reqURL <- "http://api.twitter.com/oath/request_token"
+accessURL <- "https://api.twitter.com/oauth/access_token"
+CUSTOMER_KEY <- "nSDC4fxZukXOSoC0xop56vONe"
+ACCESS_TOKEN <- "810446010-y9D6fi8x3aQeFzcLqUZ7KqwEFQOqdp0rk6EXZEuc"
+CUSTOMER_SECRET <- "NRbJuadU2BooR0IBKOlIrfER2q73baExtEBjv0ZJabxjFZMsVi"
+ACCESS_secret <- "TQCLLwlvkFWhx42KoIh9GJsKDJHBTaGWDQL0WSFy7Qn8j"
+setup_twitter_oauth(CUSTOMER_KEY, CUSTOMER_SECRET, ACCESS_TOKEN, ACCESS_secret)
+```
+
+```{r}
+tweets = searchTwitter('Peduli Lindungi', n = 2000, retryOnRateLimit = 10e5, lang = "id") #retryOnRateLimit untuk looping
+text <- do.call("rbind", lapply(tweets, as.data.frame))
+
+#saveRDS(tweets,file = 'tweet.rds')
+write.csv(text, file = 'peduli.rds')
+```
+
+```{r}
+set <- read.csv('peduli.rds')
+d = twListToDF(tweets)
+corpus <- d$text
+corpus <- Corpus(VectorSource(corpus))
+
+#hapus URL
+removeURL <- function(x) gsub("https\\S*", "", x)
+twtclean <- tm_map(corpus, removeURL)
+
+#hapus New Line
+removeNL <- function(y) gsub("\n", "", y)
+twtclean <- tm_map(twtclean, removeNL)
+
+#hapus koma
+replacecomma <- function(y) gsub(",", "", y)
+twtclean <- tm_map(twtclean, replacecomma)
+
+#hapus retweet
+removeRT <- function(y) gsub("^RT:?", "", y)
+twtclean <- tm_map(twtclean, removeRT)
+
+#hapus titik
+removetitik2 <- function(y) gsub(":", "", y)
+twtclean <- tm_map(twtclean, removetitik2)
+
+#hapus titik koma
+removetitikkoma <- function(y) gsub(";", " ", y)
+twtclean <- tm_map(twtclean, removetitikkoma)
+
+#hapus titik3
+removetitik3 <- function(y) gsub("p.", "", y)
+twtclean <- tm_map(twtclean, removetitik3)
+
+#hapus &amp
+removeamp <- function(y) gsub("&amp;", "", y)
+twtclean <- tm_map(twtclean, removeamp)
+
+#hapus Mention
+removeUN <- function(z) gsub("@[A-Za-z0-9]+", "", z)
+twtclean <- tm_map(twtclean, removeUN)
+
+#hapus Emoji
+removeEmo <- function(z) gsub("[^\x01-\x7F]", "", z)
+twtclean <- tm_map(twtclean, removeEmo)
+
+#hapus garing
+removeGaring <- function(z) gsub("/", "", z)
+twtclean <- tm_map(twtclean, removeGaring)
+
+#hapus att
+removeAtt <- function(z) gsub("@", "", z)
+twtclean <- tm_map(twtclean, removeGaring)
+
+#hapus space dll
+remove.all <- function(xy) gsub("[^[:alpha:][:space:]]*", "", xy)
+twtclean <-tm_map(twtclean,stripWhitespace)
+inspect(twtclean[1:10])
+twtclean <- tm_map(twtclean,remove.all)
+twtclean <- tm_map(twtclean, removePunctuation) #tanda baca
+twtclean <- tm_map(twtclean, tolower) #mengubah huruf kecil
+
+#hapus data yang kosong
+try.error = function(x)
+{
+  # create missing value
+  y = NA
+  # tryCatch error
+  try_error = tryCatch(tolower(x), error=function(e) e)
+  # if not an error
+  if (!inherits(try_error, "error"))
+    y = tolower(x)
+  # result
+  return(y)
+}
+
+# lower case using try and error with sapply 
+twtclean = sapply(twtclean, try.error)
+
+# remove NAs in some_txt
+twtclean = twtclean[!is.na(twtclean)]
+names(twtclean) = NULL
+write.csv(twtclean, file = "peduliClean.csv")
+```
+
+```{r}
+library(plyr)
+peduliClean <- read.csv("peduliClean.csv", header=T)
+
+#skoring
+kata.positif <- scan("kata-pos.txt",what="character",comment.char=";")
+kata.negatif <- scan("kata-neg.txt",what="character",comment.char=";")
+score.sentiment = function(sentence, positif, negatif,
+                           .progress='none')
+{
+  require(plyr)
+  require(stringr)
+  scores = laply(sentence, function(kalimat, positif,
+                                    negatif) {
+    kalimat = gsub('[[:punct:]]', '', kalimat)
+    kalimat = gsub('[[:cntrl:]]', '', kalimat)
+    kalimat = gsub('\\d+', '', kalimat)
+    kalimat = tolower(kalimat)
+    list.kata = str_split(kalimat, '\\s+')
+    kata2 = unlist(list.kata)
+    positif.matches = match(kata2, kata.positif)
+    negatif.matches = match(kata2, kata.negatif)
+    positif.matches = !is.na(positif.matches)
+    negatif.matches = !is.na(negatif.matches)
+    score = sum(positif.matches) - (sum(negatif.matches))
+    return(score)
+  }, kata.positif, kata.negatif, .progress=.progress )
+  
+  scores.df = data.frame(score=scores, text=sentence)
+  return(scores.df)}
+
+hasil = score.sentiment(peduliClean$x, kata.positif, kata.negatif)
+
+#CONVERT SCORE TO SENTIMENT
+hasil$klasifikasi<- ifelse(hasil$score<0, "Negatif",ifelse(hasil$score==0,"Netral","Positif"))
+hasil$klasifikasi
+View(hasil)
+
+#EXCHANGE ROW SEQUENCE
+data <- hasil[c(3,1,2)] #ubah urutan kolom
+View(data)
+write.csv(data, file = "peduliLabel.csv")
+```
+
+```{r}
+textClean <-data.frame(text=unlist(sapply(twtclean, `[`)), stringsAsFactors=F)
+View(textClean)
+write.csv(textClean,'peduliClean.csv')
+```
+
+```{r}
+#naive bayes
+library(e1071) #library yang terdapat sebuah algoritma naivebayes
+library(caret) #library yang terdapat sebuah algoritma naivebayes
+library(syuzhet) #library yang terdapat sebuah algoritma naivebayes
+
+#digunakan untuk membaca file csv yang sudah di cleaning data
+peduli_dataset <-read.csv("peduliClean.csv",stringsAsFactors = FALSE)
+
+#digunakan untuk mengeset variabel cloumn text menjadi char
+review <- as.character(peduli_dataset$text)
+
+#memanggil sentimen dictionary untuk menghitung presentasi dari beberapa emotion dan mengubahnya ke dalam text file
+get_nrc_sentiment('happy')
+get_nrc_sentiment('excitement')
+s <- get_nrc_sentiment(review)
+review_combine<-cbind(peduli_dataset$text,s)
+par(mar=rep(3,4))
+b <- barplot(colSums(s),col=rainbow(10),ylab='count',main='Analisis Sentimen')
+```
+
+```{r}
+require(corpus)
+
+data.frame <- read.csv("peduliLabel.csv",stringsAsFactors = F)
+data.frame$klasifikasi <- factor(data.frame$klasifikasi)
+glimpse(data.frame)
+set.seed(20)
+data.frame<-data.frame[sample(nrow(data.frame)),]
+data.frame<-data.frame[sample(nrow(data.frame)),]
+glimpse(data.frame)
+corpus<-Corpus(VectorSource(data.frame$text))
+corpus
+inspect(corpus[1:10])
+
+#fungsinya untuk membersihkan data data yang tidak dibutuhkan 
+
+corpus.clean<-corpus %>%
+  tm_map(content_transformer(tolower)) %>% #digunakan untuk mengubah huruf besar dari string menjadi string huruf kecil
+  tm_map(removePunctuation)%>% #menghapus tanda baca
+  tm_map(removeNumbers)%>% #menghapus nomor
+  tm_map(removeWords,stopwords(kind="en"))%>% #menghapus stopwords
+  tm_map(stripWhitespace) 
+dtm<-DocumentTermMatrix(corpus.clean)
+inspect(dtm[1:10,1:20])
+
+df.train<-data.frame[1:1580,]
+df.test<-data.frame[1601:1980,]   
+
+dtm.train<-dtm[1:1580,]
+dtm.test<-dtm[1601:1980,]
+
+corpus.clean.train<-corpus.clean[1:1580]
+corpus.clean.test<-corpus.clean[1601:1980]
+
+dim(dtm.train)
+
+fivefreq<-findFreqTerms(dtm.train,5)
+length(fivefreq)
+
+dtm.train.nb<-DocumentTermMatrix(corpus.clean.train,control = list(dictionary=fivefreq))
+dim(dtm.train.nb)
+
+dtm.test.nb<-DocumentTermMatrix(corpus.clean.test,control = list(dictionary=fivefreq))
+dim(dtm.test.nb)
+
+#Boolan Naive Bayes
+convert_count <- function(x){
+    y<-ifelse(x>0,1,0)
+    y<-factor(y,levels=c(0,1),labels=c("no","yes"))
+    y
+}
+
+#Naive Bayes Model
+trainNB<-apply(dtm.train.nb,2,convert_count)
+testNB<-apply(dtm.test.nb,2,convert_count)
+
+#Training
+classifier <- naiveBayes(trainNB, df.train$klasifikasi, laplace = 1)
+
+#Use the NB classifier we built to make predictions on the test set
+pred <- predict(classifier, testNB)
+
+#Create a truth table by tabulating the predicted class labels with the actual predicted class labels with the actual class labels
+NB_table=table("Prediction"= pred, "Actual" = df.test$klasifikasi)
+NB_table
+
+#confussion Matrix
+conf.matNB <- confusionMatrix(pred, df.test$klasifikasi)
+conf.matNB
+```
+
+
+```{r}
+#WordCloud
+library(wordcloud2)
+
+data1 <- read.csv('peduliLabel.csv')
+text <- data1$text
+docs <- Corpus(VectorSource(text))
+docs <- tm_map(docs, removeWords,"yang")
+docs <- tm_map(docs, removeWords,"lebih")
+docs <- tm_map(docs, removeWords,"dari")
+docs <- tm_map(docs, removeWords,"udah")
+docs <- tm_map(docs, removeWords,"mingguta")
+
+dtm <- TermDocumentMatrix(docs) 
+matrix <- as.matrix(dtm) 
+words <- sort(rowSums(matrix),decreasing=TRUE) 
+df <- data.frame(word = names(words),freq=words)
+
+tweets_words <-  data1 %>%
+  select(text) %>%
+  unnest_tokens(word, text)
+
+words <- tweets_words %>% dplyr::count(word, sort=TRUE)
+
+p <- wordcloud2(data=df, size=1, color='random-dark')
+p
+```
+
+
+```{r}
+#HistogramFrequency
+
+  data1 = read.csv("peduliLabel.csv")
+  corpus = Corpus(VectorSource(data1$text))
+      corpus <- tm_map(corpus, removeWords,"kak")
+      corpus <- tm_map(corpus, removeWords,"aja")
+      corpus <- tm_map(corpus, removeWords,"gak")
+      corpus <- tm_map(corpus, removeWords,"ðÿ")
+      corpus <- tm_map(corpus, removeWords,"amp")
+      corpus <- tm_map(corpus, removeWords,"yang")
+      corpus <- tm_map(corpus, removeWords,"dan")
+      corpus <- tm_map(corpus, removeWords,"bisa")
+      corpus <- tm_map(corpus, removeWords,"udah")
+      corpus <- tm_map(corpus, removeWords,"dari")
+  dtm <- TermDocumentMatrix(corpus)
+  m <- as.matrix(dtm)
+  v <- sort(rowSums(m),decreasing=TRUE)
+  d <- data.frame(word = names(v),freq=v)
+  barplot(d[1:20,]$freq, las = 2, names.arg = d[1:20,]$word, col=rainbow(5),
+        main = "Kata Paling Sering Muncul", ylab = "Frekuensi")
+```
+
+
+```{r}
+#shiny
+#membuka file csv
+twitter <- read.csv(file="peduliClean.csv", header=TRUE)
+
+#membuka text file pada data frame twitter
+tweet <- twitter$text
+
+#mengatur tampilan web
+ui <- fluidPage(
+  titlePanel("Penggunaan Kata peduli Pada Twitter"), #judul
+  mainPanel( #tab
+    #plot output : untuk scatterplot
+    tabsetPanel(type = "tabs",
+                tabPanel("Term Document Matrix and Statistic", verbatimTextOutput("result")),
+                tabPanel("Histogram", plotOutput("scatterplot")), #tab berupa histogram
+                tabPanel("Frequency", plotOutput("freqplot")), #tab berupa frequency
+                tabPanel("Data Twitter", DT::dataTableOutput('tbl')), #tab berupa data cleaning twitter & skoring
+                tabPanel("Wordcloud", wordcloud2Output("Wordcloud2")) #tab berupa worldcloud
+    )
+  )
+)
+
+```
+
+
+```{r}
+#Server
+#tempat data akan dianalisis dan diproses, hasilnya ditampilkan/diplotkan pada bagian mainpanel() ui
+server <- function(input, output) {
+  #output Data
+  output$result <-renderPrint({
+      conf.matNB
+  })
+  peduliLabel <- read.csv('peduliLabel.csv')
+  output$tbl = DT::renderDataTable({
+    DT::datatable(peduliLabel, options = list(lengthChange = FALSE)) #data ditampilkan dalam beberapa halaman
+  })
+  
+  #barplot
+  output$scatterplot <- renderPlot({
+    barplot(colSums(s), col=rainbow(10), ylab='count',main='Sentiment Analysis')
+  }, height = 400)
+  
+  #freq Plot
+  output$freqplot <- renderPlot({
+    barplot(d[1:20,]$freq, las = 2, names.arg = d[1:20,]$word, col=rainbow(5),
+        main = "Kata Paling Sering Muncul", ylab = "Frekuensi")
+  }, height = 400)
+  
+  #wordcloud
+  output$Wordcloud2 <- renderWordcloud2({
+    p
+  })
+}
+```
+
+```{r}
+shinyApp(ui = ui, server = server)
+```
